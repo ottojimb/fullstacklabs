@@ -147,13 +147,18 @@ defmodule AppWeb.CuboidControllerTest do
 
   describe "update cuboid" do
     test "renders cuboid when data is valid", %{conn: conn} do
+      %{cuboids: [cuboid | _]} = fixtures()
+
       cuboid_to_update = %{
+        id: cuboid.id,
         depth: 2,
         height: 2,
         width: 2
       }
 
-      cuboid_updated = json_response(conn, 200)
+      conn = patch(conn, Routes.cuboid_path(conn, :update, cuboid.id), cuboid_to_update)
+      cuboid_updated = json_response(conn, 201)
+
       assert cuboid_to_update.id == cuboid_updated["id"]
       assert cuboid_to_update.height == cuboid_updated["height"]
       assert cuboid_to_update.width == cuboid_updated["width"]
@@ -161,11 +166,15 @@ defmodule AppWeb.CuboidControllerTest do
     end
 
     test "renders cuboid when data is not valid", %{conn: conn} do
+      %{cuboids: [cuboid | _]} = fixtures()
+
       cuboid_to_update = %{
         depth: 10,
         height: 10,
         width: 10
       }
+
+      conn = patch(conn, Routes.cuboid_path(conn, :update, cuboid.id), cuboid_to_update)
 
       assert response(conn, 422) == "{\"errors\":{\"volume\":[\"Insufficient space in bag\"]}}"
     end
@@ -173,11 +182,15 @@ defmodule AppWeb.CuboidControllerTest do
 
   describe "delete cuboid" do
     test "renders cuboid when is valid", %{conn: conn} do
+      %{cuboids: [cuboid | _]} = fixtures()
+      conn = delete(conn, Routes.cuboid_path(conn, :delete, cuboid.id))
       json_response(conn, 200)
     end
 
     test "renders cuboid when is invalid", %{conn: conn} do
-      json_response(conn, 404)
+      %{cuboids: [cuboid | _]} = fixtures()
+      conn = delete(conn, Routes.cuboid_path(conn, :delete, -1))
+      assert response(conn, 404)
     end
   end
 end

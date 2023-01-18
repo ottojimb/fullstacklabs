@@ -52,6 +52,16 @@ defmodule App.Store do
     |> Repo.insert()
   end
 
+  def update_cuboid(cuboid, attrs \\ %{}) do
+    cuboid
+    |> Cuboid.changeset(attrs)
+    |> Repo.update()
+  end
+
+  def delete_cuboid(cuboid) do
+    Repo.delete(cuboid)
+  end
+
   alias App.Store.Bag
 
   @doc """
@@ -64,7 +74,17 @@ defmodule App.Store do
 
   """
   def list_bags do
-    Repo.all(Bag) |> Repo.preload(:cuboids)
+    query = from(
+      b in Bag,
+      left_join: c in assoc(b, :cuboids),
+      select_merge: %{
+        payloadVolume: coalesce(sum(c.volume), 0),
+        availableVolume: b.volume - coalesce(sum(c.volume), 0)
+      },
+      group_by: b.id,
+      order_by: b.id
+    )
+    Repo.all(query) |> Repo.preload(:cuboids)
   end
 
   @doc """
@@ -78,7 +98,20 @@ defmodule App.Store do
       %Bag{}
 
   """
-  def get_bag(id), do: Repo.get(Bag, id) |> Repo.preload(:cuboids)
+  def get_bag(id) do
+    query = from(
+      b in Bag,
+      where: b.id == ^id,
+      left_join: c in assoc(b, :cuboids),
+      select_merge: %{
+        payloadVolume: coalesce(sum(c.volume), 0),
+        availableVolume: b.volume - coalesce(sum(c.volume), 0)
+      },
+      group_by: b.id,
+      order_by: b.id
+    )
+    Repo.one(query) |> Repo.preload(:cuboids)
+  end
 
   @doc """
   Creates a bag.
@@ -96,5 +129,18 @@ defmodule App.Store do
     %Bag{}
     |> Bag.changeset(attrs)
     |> Repo.insert()
+  end
+
+  def check_bag_size(bag_id, volume) do
+    case get_bag(bag_id) do
+      nil ->
+        {:error, :not_exists}
+      bag ->
+        if bag.availableVolume < volume do
+          {:error, :not_space}
+        else
+          {:ok, bag}
+        end
+    end
   end
 end

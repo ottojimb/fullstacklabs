@@ -1,0 +1,265 @@
+diff --git a/lib/app/store.ex b/lib/app/store.ex
+index 753969b..bb3884d 100644
+--- a/lib/app/store.ex
++++ b/lib/app/store.ex
+@@ -52,6 +52,16 @@ defmodule App.Store do
+     |> Repo.insert()
+   end
+ 
++  def update_cuboid(cuboid, attrs \\ %{}) do
++    cuboid
++    |> Cuboid.changeset(attrs)
++    |> Repo.update()
++  end
++
++  def delete_cuboid(cuboid) do
++    Repo.delete(cuboid)
++  end
++
+   alias App.Store.Bag
+ 
+   @doc """
+@@ -64,7 +74,17 @@ defmodule App.Store do
+ 
+   """
+   def list_bags do
+-    Repo.all(Bag) |> Repo.preload(:cuboids)
++    query = from(
++      b in Bag,
++      left_join: c in assoc(b, :cuboids),
++      select_merge: %{
++        payloadVolume: coalesce(sum(c.volume), 0),
++        availableVolume: b.volume - coalesce(sum(c.volume), 0)
++      },
++      group_by: b.id,
++      order_by: b.id
++    )
++    Repo.all(query) |> Repo.preload(:cuboids)
+   end
+ 
+   @doc """
+@@ -78,7 +98,20 @@ defmodule App.Store do
+       %Bag{}
+ 
+   """
+-  def get_bag(id), do: Repo.get(Bag, id) |> Repo.preload(:cuboids)
++  def get_bag(id) do
++    query = from(
++      b in Bag,
++      where: b.id == ^id,
++      left_join: c in assoc(b, :cuboids),
++      select_merge: %{
++        payloadVolume: coalesce(sum(c.volume), 0),
++        availableVolume: b.volume - coalesce(sum(c.volume), 0)
++      },
++      group_by: b.id,
++      order_by: b.id
++    )
++    Repo.one(query) |> Repo.preload(:cuboids)
++  end
+ 
+   @doc """
+   Creates a bag.
+@@ -97,4 +130,17 @@ defmodule App.Store do
+     |> Bag.changeset(attrs)
+     |> Repo.insert()
+   end
++
++  def check_bag_size(bag_id, volume) do
++    case get_bag(bag_id) do
++      nil ->
++        {:error, :not_exists}
++      bag ->
++        if bag.availableVolume < volume do
++          {:error, :not_space}
++        else
++          {:ok, bag}
++        end
++    end
++  end
+ end
+diff --git a/lib/app/store/cuboid.ex b/lib/app/store/cuboid.ex
+index f996e1d..efd2b27 100644
+--- a/lib/app/store/cuboid.ex
++++ b/lib/app/store/cuboid.ex
+@@ -5,21 +5,48 @@ defmodule App.Store.Cuboid do
+ 
+   use Ecto.Schema
+   import Ecto.Changeset
++  alias App.Store
+ 
+   schema "cuboids" do
+     field :depth, :integer
+     field :height, :integer
+     field :width, :integer
++    field :volume, :integer
+     belongs_to :bag, App.Store.Bag
+ 
+     timestamps()
+   end
+ 
++  def validate_bag_size(changeset, bag_id, volume) do
++    case Store.check_bag_size(bag_id, volume) do
++      {:error, :not_space} -> changeset |> add_error(:volume, "Insufficient space in bag")
++      _ -> changeset
++    end
++  end
++
++  def get_bag_size(%{changes: %{bag_id: bag_id, volume: volume}} = changeset, _) do
++    validate_bag_size(changeset, bag_id, volume)
++  end
++
++  def get_bag_size(%{changes: %{volume: volume}} = changeset, %{bag_id: bag_id}) do
++    validate_bag_size(changeset, bag_id, volume)
++  end
++
++  def get_bag_size(changeset, _), do: changeset
++
++  def set_volume(%{changes: %{width: width, height: height, depth: depth}} = changeset) do
++    changeset|>put_change(:volume, width * height * depth)
++  end
++
++  def set_volume(changeset), do: changeset
++
+   @doc false
+   def changeset(cuboid, attrs) do
+     cuboid
+-    |> cast(attrs, [:width, :height, :depth, :bag_id])
+-    |> validate_required([:width, :height, :depth])
++    |> cast(attrs, [:width, :height, :depth, :bag_id, :volume])
++    |> set_volume()
++    |> get_bag_size(cuboid)
++    |> validate_required([:width, :height, :depth, :volume])
+     |> cast_assoc(:bag, require: true)
+     |> assoc_constraint(:bag, require: true)
+   end
+diff --git a/lib/app_web/controllers/cuboid_controller.ex b/lib/app_web/controllers/cuboid_controller.ex
+index 8bab4f8..cabc6ee 100644
+--- a/lib/app_web/controllers/cuboid_controller.ex
++++ b/lib/app_web/controllers/cuboid_controller.ex
+@@ -26,4 +26,30 @@ defmodule AppWeb.CuboidController do
+       cuboid -> render(conn, "show.json", cuboid: cuboid)
+     end
+   end
++
++  def update(conn, %{"id" => id} = cuboid_params) do
++    case Store.get_cuboid(id) do
++      nil -> conn |> send_resp(404, "")
++      cuboid ->
++        with {:ok, %Cuboid{} = cuboid} <- Store.update_cuboid(cuboid, cuboid_params) do
++          conn
++          |> put_status(:created)
++          |> put_resp_header("location", Routes.cuboid_path(conn, :update, cuboid))
++          |> render("show.json", cuboid: cuboid)
++        end
++    end
++  end
++
++  def delete(conn, %{"id" => id}) do
++    case Store.get_cuboid(id) do
++      nil -> conn |> send_resp(404, "")
++      cuboid ->
++        with {:ok, _} <- Store.delete_cuboid(cuboid) do
++          conn
++          |> put_status(200)
++          |> put_resp_header("location", Routes.cuboid_path(conn, :delete, cuboid))
++          |> render("show.json", cuboid: cuboid)
++        end
++      end
++  end
+ end
+diff --git a/lib/app_web/router.ex b/lib/app_web/router.ex
+index 006f376..6377be7 100644
+--- a/lib/app_web/router.ex
++++ b/lib/app_web/router.ex
+@@ -7,7 +7,7 @@ defmodule AppWeb.Router do
+ 
+   scope "/", AppWeb do
+     pipe_through :api
+-    resources "/cuboids", CuboidController, only: [:index, :create, :show]
++    resources "/cuboids", CuboidController, only: [:index, :create, :show, :update, :delete]
+     resources "/bags", BagController, only: [:index, :create, :show]
+   end
+ end
+diff --git a/lib/app_web/views/cuboid_view.ex b/lib/app_web/views/cuboid_view.ex
+index 56f151e..d705c9d 100644
+--- a/lib/app_web/views/cuboid_view.ex
++++ b/lib/app_web/views/cuboid_view.ex
+@@ -16,6 +16,7 @@ defmodule AppWeb.CuboidView do
+       depth: cuboid.depth,
+       height: cuboid.height,
+       width: cuboid.width,
++      volume: cuboid.volume,
+       bag: %{id: cuboid.bag_id}
+     }
+   end
+diff --git a/test/app/store_test.exs b/test/app/store_test.exs
+index 9a1c568..d77dd70 100644
+--- a/test/app/store_test.exs
++++ b/test/app/store_test.exs
+@@ -106,7 +106,7 @@ defmodule App.StoreTest do
+           bag_id: bag.id
+         })
+ 
+-      bag |> Repo.preload(:cuboids)
++      Store.get_bag(bag.id) |> Repo.preload(:cuboids)
+     end
+ 
+     test "list_bags/0 returns all bags" do
+diff --git a/test/app_web/controllers/cuboid_controller_test.exs b/test/app_web/controllers/cuboid_controller_test.exs
+index 609a28b..d8bbcda 100644
+--- a/test/app_web/controllers/cuboid_controller_test.exs
++++ b/test/app_web/controllers/cuboid_controller_test.exs
+@@ -147,13 +147,18 @@ defmodule AppWeb.CuboidControllerTest do
+ 
+   describe "update cuboid" do
+     test "renders cuboid when data is valid", %{conn: conn} do
++      %{cuboids: [cuboid | _]} = fixtures()
++
+       cuboid_to_update = %{
++        id: cuboid.id,
+         depth: 2,
+         height: 2,
+         width: 2
+       }
+ 
+-      cuboid_updated = json_response(conn, 200)
++      conn = patch(conn, Routes.cuboid_path(conn, :update, cuboid.id), cuboid_to_update)
++      cuboid_updated = json_response(conn, 201)
++
+       assert cuboid_to_update.id == cuboid_updated["id"]
+       assert cuboid_to_update.height == cuboid_updated["height"]
+       assert cuboid_to_update.width == cuboid_updated["width"]
+@@ -161,23 +166,31 @@ defmodule AppWeb.CuboidControllerTest do
+     end
+ 
+     test "renders cuboid when data is not valid", %{conn: conn} do
++      %{cuboids: [cuboid | _]} = fixtures()
++
+       cuboid_to_update = %{
+         depth: 10,
+         height: 10,
+         width: 10
+       }
+ 
++      conn = patch(conn, Routes.cuboid_path(conn, :update, cuboid.id), cuboid_to_update)
++
+       assert response(conn, 422) == "{\"errors\":{\"volume\":[\"Insufficient space in bag\"]}}"
+     end
+   end
+ 
+   describe "delete cuboid" do
+     test "renders cuboid when is valid", %{conn: conn} do
++      %{cuboids: [cuboid | _]} = fixtures()
++      conn = delete(conn, Routes.cuboid_path(conn, :delete, cuboid.id))
+       json_response(conn, 200)
+     end
+ 
+     test "renders cuboid when is invalid", %{conn: conn} do
+-      json_response(conn, 404)
++      %{cuboids: [cuboid | _]} = fixtures()
++      conn = delete(conn, Routes.cuboid_path(conn, :delete, -1))
++      assert response(conn, 404)
+     end
+   end
+ end
